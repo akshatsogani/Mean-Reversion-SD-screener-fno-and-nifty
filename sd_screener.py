@@ -5,12 +5,13 @@ import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
 warnings.filterwarnings('ignore')
 
-# Page Configuration
 st.set_page_config(
     page_title="SD Mean Reversion Screener",
     page_icon="📊",
@@ -18,138 +19,124 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for Professional Styling
-st.markdown("""
+CUSTOM_CSS = """
 <style>
-    .main {
-        padding: 0rem 1rem;
-    }
     .stButton > button {
         width: 100%;
-        background-color: #1e88e5;
+        background-color: #1f77b4;
         color: white;
         font-weight: bold;
         border-radius: 8px;
-        padding: 0.5rem 1rem;
-        border: none;
+        height: 3em;
+        font-size: 16px;
         transition: all 0.3s;
     }
     .stButton > button:hover {
-        background-color: #1565c0;
+        background-color: #0056b3;
         transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .main-header {
+        font-size: 48px;
+        font-weight: 700;
+        text-align: center;
+        color: #1f77b4;
+        margin-bottom: 0;
+    }
+    .sub-header {
+        font-size: 18px;
+        text-align: center;
+        color: #666;
+        margin-top: -10px;
+        margin-bottom: 30px;
     }
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
+        padding: 20px;
         border-radius: 10px;
         color: white;
         text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    .dataframe {
-        font-size: 14px;
+    .signal-long { background-color: #28a745; color: white; padding: 2px 8px; border-radius: 4px; }
+    .signal-short { background-color: #dc3545; color: white; padding: 2px 8px; border-radius: 4px; }
+    .signal-wait { background-color: #ffc107; color: black; padding: 2px 8px; border-radius: 4px; }
+    .signal-extreme { background-color: #6610f2; color: white; padding: 2px 8px; border-radius: 4px; }
+    div[data-testid="stDataFrame"] {
+        background-color: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 10px;
     }
-    .signal-long {
-        background-color: #4caf50;
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        padding: 0px 24px;
+        background-color: #f0f2f6;
+        border-radius: 8px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1f77b4;
         color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    .signal-short {
-        background-color: #f44336;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    .signal-wait {
-        background-color: #ffc107;
-        color: black;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    h1 {
-        text-align: center;
-        color: #1e88e5;
-    }
-    h3 {
-        color: #424242;
     }
 </style>
-""", unsafe_allow_html=True)
+"""
 
-# Constants
-SD_LOOKBACK = 756  # 3 years of trading days
+SD_LOOKBACK = 756
 MEAN_PERIOD = 8
 SD_MULTIPLIERS = [1.5, 2.0, 2.5]
 
 @st.cache_data(ttl=3600)
 def load_fno_symbols() -> List[str]:
-    """Load FNO stock symbols from Excel file."""
     try:
         df = pd.read_excel("FNO_Stock.xlsx")
         if 'Symbol' not in df.columns:
-            st.error("❌ Excel file must have a 'Symbol' column")
+            st.error("Error: 'Symbol' column not found in FNO_Stock.xlsx")
             return []
         symbols = df['Symbol'].dropna().tolist()
-        return [f"{symbol}.NS" for symbol in symbols if symbol]
+        return [f"{symbol}.NS" for symbol in symbols]
     except FileNotFoundError:
-        st.error("❌ FNO_Stock.xlsx not found. Please ensure the file is in the root directory.")
+        st.error("Error: FNO_Stock.xlsx not found. Please ensure the file is in the root directory.")
         return []
     except Exception as e:
-        st.error(f"❌ Error loading FNO symbols: {str(e)}")
+        st.error(f"Error loading FNO symbols: {str(e)}")
         return []
 
 @st.cache_data(ttl=3600)
 def fetch_stock_data(symbol: str) -> Optional[pd.DataFrame]:
-    """Fetch historical data for a single stock."""
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="4y", interval="1d")
         if len(df) < SD_LOOKBACK + 1:
             return None
         return df[['Close']]
-    except:
+    except Exception:
         return None
 
 def calculate_sd_bands(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate SD bands using exact methodology."""
     if len(df) < SD_LOOKBACK + 1:
         return df
     
-    # Get last 3 years + 1 day for difference calculation
-    lookback_df = df.tail(SD_LOOKBACK + 1).copy()
-    
-    # Calculate close-to-close differences
+    lookback_df = df.tail(SD_LOOKBACK + 1)
     differences = lookback_df['Close'].diff().dropna()
-    
-    # Calculate SD using population formula (ddof=0)
     sd_value = np.std(differences.values, ddof=0)
     
-    # Calculate 8-period SMA as mean
     df['Mean'] = df['Close'].rolling(window=MEAN_PERIOD).mean()
-    
-    # Store SD value
     df['SD_Value'] = sd_value
     
-    # Calculate all SD bands
-    df['Upper_1.5SD'] = df['Mean'] + (1.5 * sd_value)
-    df['Upper_2SD'] = df['Mean'] + (2.0 * sd_value)
-    df['Upper_2.5SD'] = df['Mean'] + (2.5 * sd_value)
-    df['Lower_1.5SD'] = df['Mean'] - (1.5 * sd_value)
-    df['Lower_2SD'] = df['Mean'] - (2.0 * sd_value)
-    df['Lower_2.5SD'] = df['Mean'] - (2.5 * sd_value)
+    for multiplier in SD_MULTIPLIERS:
+        df[f'Upper_{multiplier}SD'] = df['Mean'] + (multiplier * sd_value)
+        df[f'Lower_{multiplier}SD'] = df['Mean'] - (multiplier * sd_value)
     
-    # Calculate current SD position
     df['Current_SD_Position'] = (df['Close'] - df['Mean']) / sd_value
     
     return df
 
 def determine_signal(df: pd.DataFrame) -> str:
-    """Determine trading signal based on SD position."""
     if len(df) < 2:
-        return "WAIT"
+        return "INSUFFICIENT_DATA"
     
     latest = df.iloc[-1]
     previous = df.iloc[-2]
@@ -161,9 +148,9 @@ def determine_signal(df: pd.DataFrame) -> str:
         return "EXTREME SHORT"
     elif current_sd < -2.5:
         return "EXTREME LONG"
-    elif current_sd < 1.5 and prev_sd >= 1.5:
+    elif prev_sd > 1.5 and current_sd <= 1.5:
         return "SHORT"
-    elif current_sd > -1.5 and prev_sd <= -1.5:
+    elif prev_sd < -1.5 and current_sd >= -1.5:
         return "LONG"
     elif current_sd > 1.5:
         return "SHORT ZONE"
@@ -173,7 +160,6 @@ def determine_signal(df: pd.DataFrame) -> str:
         return "WAIT"
 
 def calculate_days_in_zone(df: pd.DataFrame) -> int:
-    """Count consecutive days where abs(Current_SD_Position) > 1.5."""
     count = 0
     for i in range(len(df)-1, -1, -1):
         if abs(df.iloc[i]['Current_SD_Position']) > 1.5:
@@ -183,13 +169,12 @@ def calculate_days_in_zone(df: pd.DataFrame) -> int:
     return count
 
 def calculate_risk_reward(current_price: float, mean: float, current_sd: float, sd_value: float) -> float:
-    """Calculate risk-reward ratio."""
     distance_to_mean = abs(current_price - mean)
     
-    if current_sd > 0:  # Overbought - SHORT setup
+    if current_sd > 0:
         stop_loss_level = mean + (2.5 * sd_value)
         risk = abs(stop_loss_level - current_price)
-    else:  # Oversold - LONG setup
+    else:
         stop_loss_level = mean - (2.5 * sd_value)
         risk = abs(current_price - stop_loss_level)
     
@@ -198,19 +183,17 @@ def calculate_risk_reward(current_price: float, mean: float, current_sd: float, 
     
     return distance_to_mean / risk
 
-def process_single_stock(symbol: str) -> Optional[Dict[str, Any]]:
-    """Process a single stock and return its metrics."""
+def process_single_stock(symbol: str) -> Optional[Dict]:
     df = fetch_stock_data(symbol)
     if df is None or len(df) < SD_LOOKBACK + 1:
         return None
     
     df = calculate_sd_bands(df)
-    if df['Mean'].iloc[-1] != df['Mean'].iloc[-1]:  # Check for NaN
+    if pd.isna(df['Mean'].iloc[-1]):
         return None
     
     signal = determine_signal(df)
     
-    # Extract metrics
     latest = df.iloc[-1]
     current_price = latest['Close']
     mean_value = latest['Mean']
@@ -226,7 +209,7 @@ def process_single_stock(symbol: str) -> Optional[Dict[str, Any]]:
     rr_ratio = calculate_risk_reward(current_price, mean_value, current_sd_pos, sd_value)
     
     return {
-        'Symbol': symbol.replace('.NS', ''),
+        'Symbol': symbol.replace('.NS', '').replace('^NSEI', 'NIFTY'),
         'Current Price': current_price,
         'Mean (8 SMA)': mean_value,
         'SD Value': sd_value,
@@ -241,29 +224,26 @@ def process_single_stock(symbol: str) -> Optional[Dict[str, Any]]:
         '-2.5 SD Level': latest['Lower_2.5SD'],
         'Expected Move': expected_move,
         'Potential Return %': potential_return,
-        'Risk-Reward': rr_ratio
+        'Risk-Reward': rr_ratio,
+        '_df': df
     }
 
-def screen_stocks(universe_choice: str, signal_filter: str, sort_by: str) -> List[Dict[str, Any]]:
-    """Main screening function with parallel processing."""
-    # Build stock list
+def screen_stocks(universe_choice: str, signal_filter: str, sort_by: str) -> List[Dict]:
+    results = []
+    
     if universe_choice == "🔵 Nifty Index (^NSEI) Only":
         symbols = ["^NSEI"]
     elif universe_choice == "📈 FNO Stocks Only":
         symbols = load_fno_symbols()
-    else:  # Both
+    else:
         symbols = ["^NSEI"] + load_fno_symbols()
     
     if not symbols:
         return []
     
-    results = []
-    
-    # Progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Parallel processing
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(process_single_stock, symbol): symbol for symbol in symbols}
         completed = 0
@@ -277,7 +257,6 @@ def screen_stocks(universe_choice: str, signal_filter: str, sort_by: str) -> Lis
             try:
                 result = future.result(timeout=10)
                 if result:
-                    # Apply signal filter
                     if signal_filter == "All Signals":
                         results.append(result)
                     elif signal_filter == "Long Setups Only" and "LONG" in result['Signal']:
@@ -286,77 +265,84 @@ def screen_stocks(universe_choice: str, signal_filter: str, sort_by: str) -> Lis
                         results.append(result)
                     elif signal_filter == "Extreme Zones Only" and "EXTREME" in result['Signal']:
                         results.append(result)
-            except:
+            except Exception:
                 continue
     
     progress_bar.empty()
     status_text.empty()
     
-    # Sort results
     if sort_by == "Distance from Mean (High to Low)":
         results.sort(key=lambda x: abs(x['Distance to Mean']), reverse=True)
     elif sort_by == "Current SD Position (Extreme to Neutral)":
         results.sort(key=lambda x: abs(x['Current Position']), reverse=True)
     elif sort_by == "Days in Current Zone (High to Low)":
         results.sort(key=lambda x: x['Days in Zone'], reverse=True)
-    else:  # Symbol A-Z
+    else:
         results.sort(key=lambda x: x['Symbol'])
     
     return results
 
 def style_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply styling to the results dataframe."""
     def color_signal(val):
-        colors = {
-            'LONG': 'background-color: #4caf50; color: white',
-            'EXTREME LONG': 'background-color: #2e7d32; color: white',
-            'LONG ZONE': 'background-color: #81c784; color: white',
-            'SHORT': 'background-color: #f44336; color: white',
-            'EXTREME SHORT': 'background-color: #c62828; color: white',
-            'SHORT ZONE': 'background-color: #ef5350; color: white',
-            'WAIT': 'background-color: #ffc107; color: black'
-        }
-        return colors.get(val, '')
+        if 'LONG' in str(val):
+            return 'background-color: #28a745; color: white'
+        elif 'SHORT' in str(val):
+            return 'background-color: #dc3545; color: white'
+        elif val == 'WAIT':
+            return 'background-color: #ffc107; color: black'
+        return ''
     
-    def color_sd_position(val):
+    def color_position(val):
         try:
-            num_val = float(val.replace(' SD', ''))
+            num_val = float(str(val).replace(' SD', ''))
             if num_val > 1.5:
-                return 'color: #c62828; font-weight: bold'
+                return 'color: #dc3545; font-weight: bold'
             elif num_val < -1.5:
-                return 'color: #2e7d32; font-weight: bold'
-            else:
-                return 'color: #757575'
+                return 'color: #28a745; font-weight: bold'
+            return 'color: #666666'
         except:
             return ''
     
     styled = df.style.applymap(color_signal, subset=['Signal'])
-    styled = styled.applymap(color_sd_position, subset=['Current Position'])
+    styled = styled.applymap(color_position, subset=['Current Position'])
     
-    # Format columns
     styled = styled.format({
         'Current Price': '₹{:.2f}',
         'Mean (8 SMA)': '₹{:.2f}',
         'SD Value': '{:.2f} pts',
-        'Current Position': '{:.2f} SD',
-        'Distance to Mean': '{:.2f} pts ({:.2f}%)',
+        'Current Position': '{:+.2f} SD',
+        'Distance to Mean': lambda x: f"{x:+.2f} pts ({x/df.loc[df['Distance to Mean'] == x, 'Current Price'].values[0]*100:+.2f}%)" if len(df.loc[df['Distance to Mean'] == x]) > 0 else "",
         'Days in Zone': '{} days',
         '+1.5 SD Level': '₹{:.2f}',
         '-1.5 SD Level': '₹{:.2f}',
         '+2.5 SD Level': '₹{:.2f}',
         '-2.5 SD Level': '₹{:.2f}',
-        'Expected Move': '{:.2f} pts',
+        'Expected Move': '{:+.2f} pts',
         'Potential Return %': '{:.2f}%',
-        'Risk-Reward': '1:{:.1f}'
+        'Risk-Reward': lambda x: f"1:{x:.1f}" if x > 0 else "N/A"
     })
     
     return styled
 
 def export_to_excel(df: pd.DataFrame) -> Tuple[io.BytesIO, str]:
-    """Export dataframe to Excel with formatting."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='SD Screener Results')
+        
+        workbook = writer.book
+        worksheet = writer.sheets['SD Screener Results']
+        
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 30)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
     
     output.seek(0)
     timestamp = datetime.now().strftime("%d%m%Y_%H%M")
@@ -364,7 +350,6 @@ def export_to_excel(df: pd.DataFrame) -> Tuple[io.BytesIO, str]:
     return output, filename
 
 def export_to_csv(df: pd.DataFrame) -> Tuple[io.BytesIO, str]:
-    """Export dataframe to CSV."""
     output = io.BytesIO()
     df.to_csv(output, index=False)
     output.seek(0)
@@ -372,277 +357,216 @@ def export_to_csv(df: pd.DataFrame) -> Tuple[io.BytesIO, str]:
     filename = f"SD_Screener_Results_{timestamp}.csv"
     return output, filename
 
-def render_summary_cards(results: List[Dict]) -> None:
-    """Display summary metrics cards."""
-    total_stocks = len(results)
-    long_setups = len([r for r in results if 'LONG' in r['Signal']])
-    short_setups = len([r for r in results if 'SHORT' in r['Signal']])
-    extreme_zones = len([r for r in results if 'EXTREME' in r['Signal']])
+def render_config_screen():
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📊 Standard Deviation Screener</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Daily Mean Reversion Analysis for Nifty & FNO Stocks</p>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("### Configuration")
+        
+        universe_choice = st.radio(
+            "Select Universe",
+            ["🔵 Nifty Index (^NSEI) Only", "📈 FNO Stocks Only", "🎯 Both Nifty + FNO Stocks"],
+            index=2
+        )
+        
+        signal_filter = st.selectbox(
+            "Signal Filter",
+            ["All Signals", "Long Setups Only", "Short Setups Only", "Extreme Zones Only"]
+        )
+        
+        sort_by = st.selectbox(
+            "Sort Results By",
+            ["Distance from Mean (High to Low)", "Current SD Position (Extreme to Neutral)", 
+             "Days in Current Zone (High to Low)", "Symbol Name (A to Z)"]
+        )
+        
+        st.markdown("---")
+        
+        if st.button("🚀 RUN ANALYSIS", use_container_width=True):
+            return universe_choice, signal_filter, sort_by
+        
+        st.info("📌 Will analyze based on 3-year rolling Standard Deviation with 8-period SMA mean")
+    
+    return None, None, None
+
+def render_summary_cards(results: List[Dict]):
+    total = len(results)
+    long_count = sum(1 for r in results if 'LONG' in r['Signal'])
+    short_count = sum(1 for r in results if 'SHORT' in r['Signal'])
+    extreme_count = sum(1 for r in results if 'EXTREME' in r['Signal'])
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("📊 Total Analyzed", f"{total_stocks} stocks")
-    
+        st.metric("📊 Total Analyzed", f"{total} stocks")
     with col2:
-        st.metric("📈 Long Setups", f"{long_setups} stocks", 
-                 f"{(long_setups/total_stocks*100):.1f}%" if total_stocks > 0 else "0%")
-    
+        st.metric("📈 Long Setups", f"{long_count} ({long_count/total*100:.1f}%)" if total > 0 else "0")
     with col3:
-        st.metric("📉 Short Setups", f"{short_setups} stocks",
-                 f"{(short_setups/total_stocks*100):.1f}%" if total_stocks > 0 else "0%")
-    
+        st.metric("📉 Short Setups", f"{short_count} ({short_count/total*100:.1f}%)" if total > 0 else "0")
     with col4:
-        st.metric("⚠️ Extreme Zones", f"{extreme_zones} stocks")
+        st.metric("⚠️ Extreme Zones", f"{extreme_count} stocks")
 
-def create_stock_chart(symbol: str, df: pd.DataFrame) -> go.Figure:
-    """Create a detailed chart for a stock."""
-    recent_df = df.tail(90)
+def render_results_table(results: List[Dict]):
+    if not results:
+        st.warning("No results found. Please adjust your filters.")
+        return None
     
-    fig = go.Figure()
+    df = pd.DataFrame(results)
     
-    # Price line
-    fig.add_trace(go.Scatter(
-        x=recent_df.index,
-        y=recent_df['Close'],
-        name='Price',
-        line=dict(color='#1e88e5', width=2)
-    ))
+    display_columns = [
+        'Symbol', 'Current Price', 'Mean (8 SMA)', 'SD Value', 'Current Position',
+        'Signal', 'Distance to Mean', 'Days in Zone', '+1.5 SD Level', '-1.5 SD Level',
+        '+2.5 SD Level', '-2.5 SD Level', 'Expected Move', 'Potential Return %', 'Risk-Reward'
+    ]
     
-    # Mean line
-    fig.add_trace(go.Scatter(
-        x=recent_df.index,
-        y=recent_df['Mean'],
-        name='Mean (8 SMA)',
-        line=dict(color='black', width=1.5, dash='dash')
-    ))
+    df_display = df[display_columns].copy()
     
-    # SD bands
-    colors = ['#ff9800', '#f44336', '#d32f2f']
-    for i, mult in enumerate([1.5, 2.0, 2.5]):
+    styled_df = style_dataframe(df_display)
+    st.dataframe(styled_df, height=600, use_container_width=True)
+    
+    return df_display
+
+def render_detail_charts(results: List[Dict], selected_symbols: List[str]):
+    if not selected_symbols:
+        return
+    
+    cols = st.columns(2)
+    for idx, symbol in enumerate(selected_symbols[:4]):
+        result = next((r for r in results if r['Symbol'] == symbol), None)
+        if not result or '_df' not in result:
+            continue
+        
+        df = result['_df'].tail(90)
+        
+        fig = go.Figure()
+        
         fig.add_trace(go.Scatter(
-            x=recent_df.index,
-            y=recent_df[f'Upper_{mult}SD'],
-            name=f'+{mult} SD',
-            line=dict(color=colors[i], width=1, dash='dot'),
-            showlegend=True
+            x=df.index, y=df['Close'],
+            mode='lines', name='Price',
+            line=dict(color='black', width=2)
         ))
+        
         fig.add_trace(go.Scatter(
-            x=recent_df.index,
-            y=recent_df[f'Lower_{mult}SD'],
-            name=f'-{mult} SD',
-            line=dict(color=colors[i], width=1, dash='dot'),
-            showlegend=True
+            x=df.index, y=df['Mean'],
+            mode='lines', name='Mean (8 SMA)',
+            line=dict(color='blue', width=1.5, dash='dash')
         ))
-    
-    fig.update_layout(
-        title=f"{symbol} - SD Band Analysis (90 Days)",
-        xaxis_title="Date",
-        yaxis_title="Price (₹)",
-        height=500,
-        hovermode='x unified',
-        template='plotly_white'
-    )
-    
-    return fig
+        
+        for multiplier in [1.5, 2.0, 2.5]:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[f'Upper_{multiplier}SD'],
+                mode='lines', name=f'+{multiplier} SD',
+                line=dict(color='red', width=0.5),
+                showlegend=multiplier==1.5
+            ))
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[f'Lower_{multiplier}SD'],
+                mode='lines', name=f'-{multiplier} SD',
+                line=dict(color='green', width=0.5),
+                showlegend=multiplier==1.5
+            ))
+        
+        fig.update_layout(
+            title=f"{symbol} - 90 Day SD Analysis",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            height=400,
+            hovermode='x unified'
+        )
+        
+        with cols[idx % 2]:
+            st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    # Initialize session state
-    if 'screen_results' not in st.session_state:
-        st.session_state.screen_results = None
-    if 'config_submitted' not in st.session_state:
-        st.session_state.config_submitted = False
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
     
-    # Title
-    st.markdown("<h1>📊 Standard Deviation Screener</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #666;'>Daily Mean Reversion Analysis for Nifty & FNO Stocks</p>", unsafe_allow_html=True)
-    
-    # Configuration screen
-    if not st.session_state.config_submitted:
+    if 'results' not in st.session_state:
+        universe, signal_filter, sort_by = render_config_screen()
+        
+        if universe and signal_filter and sort_by:
+            with st.spinner("Analyzing stocks..."):
+                results = screen_stocks(universe, signal_filter, sort_by)
+                st.session_state.results = results
+                st.session_state.universe = universe
+                st.session_state.signal_filter = signal_filter
+                st.session_state.sort_by = sort_by
+                st.rerun()
+    else:
+        st.markdown('<h1 class="main-header">📊 Standard Deviation Screener</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-header">Analysis Results</p>', unsafe_allow_html=True)
+        
+        render_summary_cards(st.session_state.results)
+        
         st.markdown("---")
+        st.markdown("### 📋 Screening Results")
         
-        col1, col2, col3 = st.columns([1, 2, 1])
+        df = render_results_table(st.session_state.results)
         
-        with col2:
-            st.markdown("### Configuration")
+        if df is not None:
+            st.markdown("---")
+            col1, col2, col3 = st.columns([1, 1, 2])
             
-            universe_choice = st.radio(
-                "**Select Universe:**",
-                ["🔵 Nifty Index (^NSEI) Only", "📈 FNO Stocks Only", "🎯 Both Nifty + FNO Stocks"],
-                index=0
-            )
+            with col1:
+                excel_data, excel_filename = export_to_excel(df)
+                st.download_button(
+                    label="📥 Download as Excel",
+                    data=excel_data,
+                    file_name=excel_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             
-            signal_filter = st.selectbox(
-                "**Signal Filter:**",
-                ["All Signals", "Long Setups Only", "Short Setups Only", "Extreme Zones Only"],
-                index=0
-            )
+            with col2:
+                csv_data, csv_filename = export_to_csv(df)
+                st.download_button(
+                    label="📄 Download as CSV",
+                    data=csv_data.getvalue(),
+                    file_name=csv_filename,
+                    mime="text/csv"
+                )
             
-            sort_by = st.selectbox(
-                "**Sort Results By:**",
-                ["Distance from Mean (High to Low)", "Current SD Position (Extreme to Neutral)", 
-                 "Days in Current Zone (High to Low)", "Symbol Name (A to Z)"],
-                index=0
-            )
+            with col3:
+                if st.button("🔄 New Analysis"):
+                    del st.session_state.results
+                    st.rerun()
+            
+            with st.expander("📊 View Detailed Charts for Selected Stocks"):
+                available_symbols = [r['Symbol'] for r in st.session_state.results]
+                selected = st.multiselect(
+                    "Select stocks to view charts (max 4)",
+                    available_symbols,
+                    max_selections=4
+                )
+                if selected:
+                    render_detail_charts(st.session_state.results, selected)
             
             st.markdown("---")
             
-            if st.button("🚀 **RUN ANALYSIS**", type="primary"):
-                with st.spinner("Running analysis..."):
-                    results = screen_stocks(universe_choice, signal_filter, sort_by)
-                    st.session_state.screen_results = results
-                    st.session_state.config_submitted = True
-                    st.rerun()
+            with st.expander("ℹ️ About Standard Deviation Strategy"):
+                st.markdown("""
+                **Strategy Overview:**
+                - Uses 8-period SMA as the mean line
+                - Calculates 3-year rolling standard deviation from close-to-close price differences
+                - Identifies mean reversion opportunities when price deviates beyond ±1.5 SD
+                
+                **Signal Interpretation:**
+                - **LONG/EXTREME LONG**: Price below -1.5/-2.5 SD, expect bounce back to mean
+                - **SHORT/EXTREME SHORT**: Price above +1.5/+2.5 SD, expect pullback to mean
+                - **WAIT**: Price within ±1.5 SD bands, no clear signal
+                
+                **Risk Management:**
+                - Stop loss at ±2.5 SD levels
+                - Target at mean (8 SMA)
+                - Risk-Reward calculated based on distance to mean vs distance to stop
+                
+                **Disclaimer:** This is for educational purposes only. Always do your own research before trading.
+                """)
             
-            st.markdown("<p style='text-align: center; color: #888; margin-top: 20px;'>Will analyze based on 3-year rolling Standard Deviation</p>", unsafe_allow_html=True)
-    
-    # Results screen
-    else:
-        results = st.session_state.screen_results
-        
-        if not results:
-            st.warning("No stocks found matching the criteria. Please adjust filters and try again.")
-            if st.button("⚙️ Change Configuration"):
-                st.session_state.config_submitted = False
-                st.rerun()
-            return
-        
-        # Summary cards
-        render_summary_cards(results)
-        
-        st.markdown("---")
-        
-        # Convert results to DataFrame
-        results_df = pd.DataFrame(results)
-        
-        # Format columns for display
-        display_df = results_df.copy()
-        display_df['Current Position'] = display_df['Current Position'].apply(lambda x: f"{x:+.2f} SD")
-        display_df['Distance to Mean'] = display_df.apply(
-            lambda row: f"{row['Distance to Mean']:+.2f} pts ({row['Distance %']:+.2f}%)", axis=1
-        )
-        display_df['Days in Zone'] = display_df['Days in Zone'].apply(lambda x: f"{x} days")
-        display_df['Risk-Reward'] = display_df['Risk-Reward'].apply(lambda x: f"1:{x:.1f}" if x > 0 else "N/A")
-        
-        # Select columns for display
-        display_columns = [
-            'Symbol', 'Current Price', 'Mean (8 SMA)', 'SD Value', 'Current Position',
-            'Signal', 'Distance to Mean', 'Days in Zone', '+1.5 SD Level', '-1.5 SD Level',
-            '+2.5 SD Level', '-2.5 SD Level', 'Expected Move', 'Potential Return %', 'Risk-Reward'
-        ]
-        
-        display_df = display_df[display_columns]
-        
-        # Display main results table
-        st.markdown("### 📋 Screening Results")
-        st.dataframe(
-            style_dataframe(display_df),
-            height=600,
-            use_container_width=True
-        )
-        
-        # Export buttons
-        st.markdown("---")
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-        
-        with col1:
-            excel_data, excel_filename = export_to_excel(display_df)
-            st.download_button(
-                label="📥 Download Excel",
-                data=excel_data,
-                file_name=excel_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        with col2:
-            csv_data, csv_filename = export_to_csv(display_df)
-            st.download_button(
-                label="📄 Download CSV",
-                data=csv_data,
-                file_name=csv_filename,
-                mime="text/csv"
-            )
-        
-        with col3:
-            if st.button("🔄 Refresh Data"):
-                st.cache_data.clear()
-                st.session_state.config_submitted = False
-                st.session_state.screen_results = None
-                st.rerun()
-        
-        with col4:
-            if st.button("⚙️ Change Configuration"):
-                st.session_state.config_submitted = False
-                st.rerun()
-        
-        # Detailed charts (optional)
-        with st.expander("📊 View Detailed Charts for Selected Stocks"):
-            selected_symbols = st.multiselect(
-                "Select stocks to view charts:",
-                options=[r['Symbol'] for r in results]
-            )
-            
-            if selected_symbols:
-                for symbol in selected_symbols:
-                    symbol_with_suffix = f"{symbol}.NS" if symbol != "^NSEI" else symbol
-                    df = fetch_stock_data(symbol_with_suffix)
-                    if df is not None:
-                        df = calculate_sd_bands(df)
-                        fig = create_stock_chart(symbol, df)
-                        st.plotly_chart(fig, use_container_width=True)
-        
-        # Bottom summary
-        st.markdown("---")
-        st.markdown("### 📊 Market Overview")
-        
-        total = len(results)
-        overbought = len([r for r in results if r['Current Position'] > 1.5])
-        oversold = len([r for r in results if r['Current Position'] < -1.5])
-        neutral = total - overbought - oversold
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.info(f"**Overbought:** {overbought} stocks ({overbought/total*100:.1f}%)")
-        with col2:
-            st.success(f"**Oversold:** {oversold} stocks ({oversold/total*100:.1f}%)")
-        with col3:
-            st.warning(f"**Neutral:** {neutral} stocks ({neutral/total*100:.1f}%)")
-        
-        # Top opportunities
-        st.markdown("### 🎯 Top 5 Opportunities")
-        top_opps = sorted(results, key=lambda x: x['Risk-Reward'] if x['Risk-Reward'] > 0 else 0, reverse=True)[:5]
-        
-        top_df = pd.DataFrame(top_opps)[['Symbol', 'Signal', 'Current Position', 'Potential Return %', 'Risk-Reward']]
-        top_df['Current Position'] = top_df['Current Position'].apply(lambda x: f"{x:+.2f} SD")
-        top_df['Risk-Reward'] = top_df['Risk-Reward'].apply(lambda x: f"1:{x:.1f}" if x > 0 else "N/A")
-        
-        st.dataframe(top_df, use_container_width=True)
-        
-        # Extreme zones alert
-        extreme_stocks = [r['Symbol'] for r in results if 'EXTREME' in r['Signal']]
-        if extreme_stocks:
-            st.warning(f"⚠️ **Stocks at Extreme Levels (±2.5 SD):** {', '.join(extreme_stocks)}")
-        
-        # Footer
-        st.markdown("---")
-        st.caption(f"Last Updated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')} IST")
-        
-        with st.expander("ℹ️ About This Strategy"):
-            st.markdown("""
-            **Standard Deviation Mean Reversion Strategy:**
-            
-            This screener identifies stocks that have deviated significantly from their mean and are likely to revert:
-            
-            - **Mean Line:** 8-period Simple Moving Average of closing prices
-            - **Standard Deviation:** Calculated using 3 years of close-to-close price differences
-            - **Entry Signals:**
-              - LONG: Price crosses above -1.5 SD (oversold reversal)
-              - SHORT: Price crosses below +1.5 SD (overbought reversal)
-            - **Stop Loss:** Set at ±2.5 SD levels
-            - **Target:** Mean reversion (8 SMA)
-            
-            **Risk Disclaimer:** This is for educational purposes only. Always conduct your own research before trading.
-            """)
+            st.markdown("---")
+            st.caption(f"Last Updated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')} IST")
 
 if __name__ == "__main__":
     main()
